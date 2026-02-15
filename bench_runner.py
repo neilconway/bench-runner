@@ -14,6 +14,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 SERVER_NAME = "bench-runner"
@@ -129,19 +130,31 @@ def get_ssh_key_name():
     return keys[0]["name"]
 
 
-def create_server(server_type, ssh_key_name):
+def create_server(server_type, ssh_key_name, toolchain):
     """Provision a Hetzner server with cloud-init."""
-    print(f"Creating server '{SERVER_NAME}' (type: {server_type})...")
-    hcloud_cmd([
-        "server", "create",
-        "--name", SERVER_NAME,
-        "--type", server_type,
-        "--image", "ubuntu-24.04",
-        "--location", "fsn1",
-        "--ssh-key", ssh_key_name,
-        "--label", SERVER_LABEL,
-        "--user-data-from-file", CLOUD_INIT_PATH,
-    ], capture=False)
+    print(f"Creating server '{SERVER_NAME}' (type: {server_type}, toolchain: {toolchain})...")
+
+    # Render cloud-init template with the chosen toolchain
+    with open(CLOUD_INIT_PATH) as f:
+        user_data = f.read().replace("{{RUST_TOOLCHAIN}}", toolchain)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
+        tmp.write(user_data)
+        tmp_path = tmp.name
+
+    try:
+        hcloud_cmd([
+            "server", "create",
+            "--name", SERVER_NAME,
+            "--type", server_type,
+            "--image", "ubuntu-24.04",
+            "--location", "fsn1",
+            "--ssh-key", ssh_key_name,
+            "--label", SERVER_LABEL,
+            "--user-data-from-file", tmp_path,
+        ], capture=False)
+    finally:
+        os.unlink(tmp_path)
 
     # Get the server IP
     servers = hcloud_json(["server", "list", "-l", SERVER_LABEL])
@@ -295,7 +308,7 @@ def cmd_run(args):
     preflight_checks()
 
     ssh_key_name = get_ssh_key_name()
-    ip = create_server(args.server_type, ssh_key_name)
+    ip = create_server(args.server_type, ssh_key_name, args.toolchain)
     _cleanup_server_name = SERVER_NAME
 
     try:
@@ -364,6 +377,11 @@ def main():
     run_parser.add_argument("--target", required=True, help="Target branch to compare")
     run_parser.add_argument("--bench", required=True, help="Benchmark name for cargo bench --bench")
     run_parser.add_argument("--filter", default=None, help="Criterion filter pattern")
+    run_parser.add_argument(
+        "--toolchain",
+        default=os.environ.get("BENCH_RUNNER_TOOLCHAIN", "stable"),
+        help="Rust toolchain (default: $BENCH_RUNNER_TOOLCHAIN or stable, e.g. nightly, 1.82.0)",
+    )
     run_parser.add_argument("--server-type", default="ccx13", help="Hetzner server type (default: ccx13)")
     run_parser.add_argument("--keep", action="store_true", help="Don't destroy server after run")
     run_parser.set_defaults(func=cmd_run)
