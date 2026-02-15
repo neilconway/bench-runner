@@ -21,7 +21,8 @@ SERVER_NAME = "bench-runner"
 SERVER_LABEL = "purpose=bench-runner"
 CLOUD_INIT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cloud-init.yaml")
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
-SSH_OPTS = [
+DEFAULT_SSH_KEY = os.path.join(os.path.expanduser("~"), ".ssh", "hetzner-bench")
+SSH_BASE_OPTS = [
     "-o", "StrictHostKeyChecking=no",
     "-o", "UserKnownHostsFile=/dev/null",
     "-o", "ConnectTimeout=10",
@@ -31,6 +32,15 @@ SSH_OPTS = [
 # Global for signal-handler cleanup
 _cleanup_server_name = None
 _keep_server = False
+_ssh_key_path = None
+
+
+def ssh_opts():
+    """Build SSH options list, including the identity file if set."""
+    opts = list(SSH_BASE_OPTS)
+    if _ssh_key_path:
+        opts = ["-i", _ssh_key_path] + opts
+    return opts
 
 
 def run_cmd(args, capture=False, check=True, stream=False, timeout=None):
@@ -71,7 +81,7 @@ def hcloud_json(args):
 
 def ssh_cmd(ip, command, stream=False, check=True, timeout=None):
     """Run a command on the remote server via SSH."""
-    args = ["ssh"] + SSH_OPTS + [f"root@{ip}", command]
+    args = ["ssh"] + ssh_opts() + [f"root@{ip}", command]
     if stream:
         return run_cmd(args, stream=True, check=check, timeout=timeout)
     return run_cmd(args, capture=True, check=check, timeout=timeout)
@@ -79,7 +89,7 @@ def ssh_cmd(ip, command, stream=False, check=True, timeout=None):
 
 def scp_from(ip, remote_path, local_path):
     """Copy a file from the remote server."""
-    run_cmd(["scp"] + SSH_OPTS + [f"root@{ip}:{remote_path}", local_path])
+    run_cmd(["scp"] + ssh_opts() + [f"root@{ip}:{remote_path}", local_path])
 
 
 def preflight_checks():
@@ -96,13 +106,8 @@ def preflight_checks():
         sys.exit("Error: No active hcloud context. Run: hcloud context create bench-runner")
 
     # Check SSH key exists
-    home = os.path.expanduser("~")
-    ssh_key_paths = [
-        os.path.join(home, ".ssh", "id_ed25519"),
-        os.path.join(home, ".ssh", "id_rsa"),
-    ]
-    if not any(os.path.exists(p) for p in ssh_key_paths):
-        sys.exit(f"Error: No SSH key found at {' or '.join(ssh_key_paths)}")
+    if not os.path.exists(_ssh_key_path):
+        sys.exit(f"Error: SSH key not found at {_ssh_key_path}")
 
     # Check no existing benchmark server (lock)
     servers = hcloud_json(["server", "list", "-l", SERVER_LABEL])
@@ -148,7 +153,7 @@ def create_server(server_type, ssh_key_name, toolchain):
             "--name", SERVER_NAME,
             "--type", server_type,
             "--image", "ubuntu-24.04",
-            "--location", "fsn1",
+            "--location", "ash",
             "--ssh-key", ssh_key_name,
             "--label", SERVER_LABEL,
             "--user-data-from-file", tmp_path,
@@ -302,8 +307,9 @@ def _signal_handler(signum, frame):
 
 def cmd_run(args):
     """Run benchmarks on a remote server."""
-    global _cleanup_server_name, _keep_server
+    global _cleanup_server_name, _keep_server, _ssh_key_path
     _keep_server = args.keep
+    _ssh_key_path = args.ssh_key
 
     preflight_checks()
 
@@ -381,6 +387,11 @@ def main():
         "--toolchain",
         default=os.environ.get("BENCH_RUNNER_TOOLCHAIN", "stable"),
         help="Rust toolchain (default: $BENCH_RUNNER_TOOLCHAIN or stable, e.g. nightly, 1.82.0)",
+    )
+    run_parser.add_argument(
+        "--ssh-key",
+        default=os.environ.get("BENCH_RUNNER_SSH_KEY", DEFAULT_SSH_KEY),
+        help="Path to SSH private key (default: $BENCH_RUNNER_SSH_KEY or ~/.ssh/hetzner-bench)",
     )
     run_parser.add_argument("--server-type", default="ccx13", help="Hetzner server type (default: ccx13)")
     run_parser.add_argument("--keep", action="store_true", help="Don't destroy server after run")
