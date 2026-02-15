@@ -1,0 +1,28 @@
+#cloud-config
+# Bootstrap a Hetzner server for running Cargo benchmarks.
+# Installs Rust stable toolchain, build dependencies, and critcmp.
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - build-essential
+  - pkg-config
+  - libssl-dev
+  - cmake
+  - git
+  - curl
+
+# Disable unattended-upgrades to avoid interference during benchmarks
+runcmd:
+  - systemctl stop unattended-upgrades || true
+  - systemctl disable unattended-upgrades || true
+  - systemctl stop apt-daily.timer || true
+  - systemctl disable apt-daily.timer || true
+  - systemctl stop apt-daily-upgrade.timer || true
+  - systemctl disable apt-daily-upgrade.timer || true
+  # Install Rust for root user
+  - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+  - /root/.cargo/bin/cargo install critcmp
+  # Signal that cloud-init is done
+  - touch /root/.cloud-init-complete
