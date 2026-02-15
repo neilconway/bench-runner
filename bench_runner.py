@@ -11,13 +11,14 @@ No third-party Python dependencies (stdlib only).
 import argparse
 import json
 import os
+import secrets
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 
-SERVER_NAME = "bench-runner"
+SERVER_NAME_PREFIX = "bench-runner"
 SERVER_LABEL = "purpose=bench-runner"
 CLOUD_INIT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cloud-init.yaml")
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
@@ -109,20 +110,6 @@ def preflight_checks():
     if not os.path.exists(_ssh_key_path):
         sys.exit(f"Error: SSH key not found at {_ssh_key_path}")
 
-    # Check no existing benchmark server (lock)
-    servers = hcloud_json(["server", "list", "-l", SERVER_LABEL])
-    if servers:
-        s = servers[0]
-        name = s.get("name", "unknown")
-        created = s.get("created", "unknown")
-        ip = s.get("public_net", {}).get("ipv4", {}).get("ip", "unknown")
-        print(f"Error: A benchmark server already exists.", file=sys.stderr)
-        print(f"  Name: {name}", file=sys.stderr)
-        print(f"  IP: {ip}", file=sys.stderr)
-        print(f"  Created: {created}", file=sys.stderr)
-        print(f"Use 'python bench_runner.py destroy' to tear it down.", file=sys.stderr)
-        sys.exit(1)
-
 
 def get_ssh_key_name():
     """Get the name of an SSH key registered with Hetzner."""
@@ -135,9 +122,9 @@ def get_ssh_key_name():
     return keys[0]["name"]
 
 
-def create_server(server_type, ssh_key_name, toolchain):
+def create_server(server_name, server_type, ssh_key_name, toolchain):
     """Provision a Hetzner server with cloud-init."""
-    print(f"Creating server '{SERVER_NAME}' (type: {server_type}, toolchain: {toolchain})...")
+    print(f"Creating server '{server_name}' (type: {server_type}, toolchain: {toolchain})...")
 
     # Render cloud-init template with the chosen toolchain
     with open(CLOUD_INIT_PATH) as f:
@@ -150,7 +137,7 @@ def create_server(server_type, ssh_key_name, toolchain):
     try:
         hcloud_cmd([
             "server", "create",
-            "--name", SERVER_NAME,
+            "--name", server_name,
             "--type", server_type,
             "--image", "ubuntu-24.04",
             "--location", "ash",
@@ -161,13 +148,14 @@ def create_server(server_type, ssh_key_name, toolchain):
     finally:
         os.unlink(tmp_path)
 
-    # Get the server IP
-    servers = hcloud_json(["server", "list", "-l", SERVER_LABEL])
-    if not servers:
-        sys.exit("Error: Server was created but could not be found.")
-    ip = servers[0]["public_net"]["ipv4"]["ip"]
-    print(f"Server created. IP: {ip}")
-    return ip
+    # Get the server IP by name
+    servers = hcloud_json(["server", "list"])
+    for s in servers:
+        if s["name"] == server_name:
+            ip = s["public_net"]["ipv4"]["ip"]
+            print(f"Server created. IP: {ip}")
+            return ip
+    sys.exit("Error: Server was created but could not be found.")
 
 
 def wait_for_ssh(ip, timeout=90):
@@ -263,27 +251,19 @@ def run_benchmarks(ip, repo, base, target, bench, bench_filter):
     return comparison
 
 
-def fetch_results(ip):
-    """Fetch benchmark result files from the remote server."""
+def fetch_results(ip, comparison_output):
+    """Save benchmark comparison results locally."""
     os.makedirs(RESULTS_DIR, exist_ok=True)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
 
-    # Export critcmp JSON
-    try:
-        json_output = ssh_cmd(
-            ip,
-            "cd /root/repo && source /root/.cargo/env && critcmp base target --export",
-        )
-        if json_output:
-            result_path = os.path.join(RESULTS_DIR, f"comparison-{timestamp}.json")
-            with open(result_path, "w") as f:
-                f.write(json_output)
-            print(f"\nResults saved to {result_path}")
-    except subprocess.CalledProcessError:
-        print("Warning: Could not export critcmp JSON results.", file=sys.stderr)
+    if comparison_output:
+        result_path = os.path.join(RESULTS_DIR, f"comparison-{timestamp}.txt")
+        with open(result_path, "w") as f:
+            f.write(comparison_output)
+        print(f"\nResults saved to {result_path}")
 
 
-def destroy_server(name=SERVER_NAME):
+def destroy_server(name):
     """Tear down the benchmark server."""
     print(f"Destroying server '{name}'...")
     try:
@@ -313,54 +293,55 @@ def cmd_run(args):
 
     preflight_checks()
 
+    server_name = f"{SERVER_NAME_PREFIX}-{secrets.token_hex(4)}"
     ssh_key_name = get_ssh_key_name()
-    ip = create_server(args.server_type, ssh_key_name, args.toolchain)
-    _cleanup_server_name = SERVER_NAME
+    ip = create_server(server_name, args.server_type, ssh_key_name, args.toolchain)
+    _cleanup_server_name = server_name
 
     try:
         wait_for_ssh(ip)
         wait_for_cloud_init(ip)
         quiesce_system(ip)
-        run_benchmarks(ip, args.repo, args.base, args.target, args.bench, args.filter)
-        fetch_results(ip)
+        comparison = run_benchmarks(ip, args.repo, args.base, args.target, args.bench, args.filter)
+        fetch_results(ip, comparison)
     finally:
         if args.keep:
-            print(f"\n--keep specified. Server '{SERVER_NAME}' left running at {ip}.")
+            print(f"\n--keep specified. Server '{server_name}' left running at {ip}.")
             print(f"Destroy it manually with: python bench_runner.py destroy")
         else:
-            destroy_server(SERVER_NAME)
+            destroy_server(server_name)
             _cleanup_server_name = None
 
 
 def cmd_status(args):
-    """Check if a benchmark server is currently running."""
+    """Check if any benchmark servers are currently running."""
     servers = hcloud_json(["server", "list", "-l", SERVER_LABEL])
     if not servers:
-        print("No benchmark server is currently running.")
+        print("No benchmark servers are currently running.")
         return
 
-    s = servers[0]
-    name = s.get("name", "unknown")
-    status = s.get("status", "unknown")
-    created = s.get("created", "unknown")
-    server_type = s.get("server_type", {}).get("name", "unknown")
-    ip = s.get("public_net", {}).get("ipv4", {}).get("ip", "unknown")
-
-    print(f"Benchmark server is running:")
-    print(f"  Name:    {name}")
-    print(f"  Status:  {status}")
-    print(f"  Type:    {server_type}")
-    print(f"  IP:      {ip}")
-    print(f"  Created: {created}")
+    print(f"{len(servers)} benchmark server(s) running:")
+    for s in servers:
+        name = s.get("name", "unknown")
+        status = s.get("status", "unknown")
+        created = s.get("created", "unknown")
+        server_type = s.get("server_type", {}).get("name", "unknown")
+        ip = s.get("public_net", {}).get("ipv4", {}).get("ip", "unknown")
+        print(f"\n  Name:    {name}")
+        print(f"  Status:  {status}")
+        print(f"  Type:    {server_type}")
+        print(f"  IP:      {ip}")
+        print(f"  Created: {created}")
 
 
 def cmd_destroy(args):
-    """Manually tear down the benchmark server."""
+    """Manually tear down benchmark servers."""
     servers = hcloud_json(["server", "list", "-l", SERVER_LABEL])
     if not servers:
-        print("No benchmark server found to destroy.")
+        print("No benchmark servers found to destroy.")
         return
-    destroy_server(servers[0]["name"])
+    for s in servers:
+        destroy_server(s["name"])
 
 
 def main():
