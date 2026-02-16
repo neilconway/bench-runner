@@ -1,6 +1,6 @@
 #cloud-config
 # Bootstrap a Hetzner server for running Cargo benchmarks.
-# Installs Rust stable toolchain, build dependencies, and critcmp.
+# Installs Rust toolchain, build dependencies, and critcmp.
 
 package_update: true
 package_upgrade: false

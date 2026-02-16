@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Remote benchmark runner using Hetzner Cloud.
 
-Spins up a dedicated-vCPU server, runs cargo bench on two branches,
+Spins up a cloud server, runs cargo bench on two branches,
 compares results with critcmp, and tears down the server.
 
 Requires: hcloud CLI configured with an active context, SSH key.
@@ -37,12 +37,29 @@ _ssh_key_path = None
 
 
 _stage_num = 0
+_stage_start = None
+_run_start = None
+
+
+def _format_elapsed(seconds):
+    """Format elapsed seconds as a human-readable string."""
+    minutes, secs = divmod(int(seconds), 60)
+    if minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
 
 
 def stage(msg):
-    """Print a prominent stage banner."""
-    global _stage_num
+    """Print a prominent stage banner with elapsed time for previous stage."""
+    global _stage_num, _stage_start, _run_start
+    now = time.time()
+    if _stage_start is not None:
+        elapsed = _format_elapsed(now - _stage_start)
+        print(f"\n  [stage completed in {elapsed}]")
     _stage_num += 1
+    if _run_start is None:
+        _run_start = now
+    _stage_start = now
     print(f"\n{'='*60}")
     print(f"  [{_stage_num}] {msg}")
     print(f"{'='*60}\n")
@@ -98,11 +115,6 @@ def ssh_cmd(ip, command, stream=False, check=True, timeout=None):
     if stream:
         return run_cmd(args, stream=True, check=check, timeout=timeout)
     return run_cmd(args, capture=True, check=check, timeout=timeout)
-
-
-def scp_from(ip, remote_path, local_path):
-    """Copy a file from the remote server."""
-    run_cmd(["scp"] + ssh_opts() + [f"root@{ip}:{remote_path}", local_path])
 
 
 def preflight_checks():
@@ -290,17 +302,19 @@ def _signal_handler(signum, frame):
 
 def cmd_run(args):
     """Run benchmarks on a remote server."""
-    global _cleanup_server_name, _keep_server, _ssh_key_path, _stage_num
+    global _cleanup_server_name, _keep_server, _ssh_key_path, _stage_num, _stage_start, _run_start
     _keep_server = args.keep
     _ssh_key_path = args.ssh_key
     _stage_num = 0
+    _stage_start = None
+    _run_start = None
 
     preflight_checks()
 
     server_name = f"{SERVER_NAME_PREFIX}-{secrets.token_hex(4)}"
+    _cleanup_server_name = server_name
     ssh_key_name = get_ssh_key_name()
     ip = create_server(server_name, args.server_type, ssh_key_name, args.toolchain)
-    _cleanup_server_name = server_name
 
     try:
         wait_for_ssh(ip)
@@ -317,6 +331,10 @@ def cmd_run(args):
             stage("Tearing down server")
             destroy_server(server_name)
             _cleanup_server_name = None
+
+    if _run_start is not None:
+        total = _format_elapsed(time.time() - _run_start)
+        print(f"\nTotal elapsed time: {total}")
 
 
 def cmd_status(args):
