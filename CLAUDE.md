@@ -86,6 +86,10 @@ Optional: `BENCH_RUNNER_SSH_KEY` (defaults to `~/.ssh/hetzner-bench`).
 - **Server label**: `purpose=bench-runner` (used by `status` and `destroy` commands)
 - Servers are automatically destroyed on completion, Ctrl-C, or SIGTERM unless `--keep` is set
 
+## Presenting results
+
+When presenting benchmark results to the user, always include the full `critcmp` output rather than summarizing or abbreviating it.
+
 ## Design conventions
 
 - **Zero Python dependencies**: stdlib only, shells out to `hcloud` and `ssh`
