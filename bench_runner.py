@@ -36,6 +36,18 @@ _keep_server = False
 _ssh_key_path = None
 
 
+_stage_num = 0
+
+
+def stage(msg):
+    """Print a prominent stage banner."""
+    global _stage_num
+    _stage_num += 1
+    print(f"\n{'='*60}")
+    print(f"  [{_stage_num}] {msg}")
+    print(f"{'='*60}\n")
+
+
 def ssh_opts():
     """Build SSH options list, including the identity file if set."""
     opts = list(SSH_BASE_OPTS)
@@ -124,7 +136,7 @@ def get_ssh_key_name():
 
 def create_server(server_name, server_type, ssh_key_name, toolchain):
     """Provision a Hetzner server with cloud-init."""
-    print(f"Creating server '{server_name}' (type: {server_type}, toolchain: {toolchain})...")
+    stage(f"Provisioning server ({server_type}, toolchain {toolchain})")
 
     # Render cloud-init template with the chosen toolchain
     with open(CLOUD_INIT_PATH) as f:
@@ -160,7 +172,7 @@ def create_server(server_name, server_type, ssh_key_name, toolchain):
 
 def wait_for_ssh(ip, timeout=90):
     """Wait until SSH is available on the server."""
-    print("Waiting for SSH connectivity...")
+    stage("Waiting for server to become reachable")
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -174,7 +186,7 @@ def wait_for_ssh(ip, timeout=90):
 
 def wait_for_cloud_init(ip, timeout=600):
     """Wait until cloud-init has finished on the server."""
-    print("Waiting for cloud-init to complete (this takes ~3-5 minutes)...")
+    stage("Installing toolchain via cloud-init (~3-5 min)")
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -190,7 +202,7 @@ def wait_for_cloud_init(ip, timeout=600):
 
 def quiesce_system(ip):
     """Stop background services and drop caches before benchmarking."""
-    print("Quiescing system...")
+    stage("Quiescing system for benchmarking")
     commands = [
         "systemctl stop unattended-upgrades 2>/dev/null; true",
         "systemctl stop snapd 2>/dev/null; true",
@@ -209,18 +221,14 @@ def quiesce_system(ip):
 
 def run_benchmarks(ip, repo, base, target, bench, bench_filter):
     """Clone the repo and run benchmarks on both branches."""
-    print(f"\n{'='*60}")
-    print(f"Cloning {repo}...")
-    print(f"{'='*60}")
+    stage(f"Cloning {repo}")
     ssh_cmd(ip, f"git clone --depth=50 --no-single-branch {repo} /root/repo", stream=True)
 
-    # Run base branch benchmarks
-    print(f"\n{'='*60}")
-    print(f"Benchmarking base branch: {base}")
-    print(f"{'='*60}")
-    ssh_cmd(ip, f"cd /root/repo && git checkout {base}", stream=True)
-
     filter_arg = f"'{bench_filter}'" if bench_filter else ""
+
+    # Run base branch benchmarks
+    stage(f"Benchmarking base branch: {base}")
+    ssh_cmd(ip, f"cd /root/repo && git checkout {base}", stream=True)
     bench_cmd_base = (
         f"cd /root/repo && source /root/.cargo/env && "
         f"cargo bench --bench {bench} -- --save-baseline base {filter_arg}"
@@ -228,21 +236,16 @@ def run_benchmarks(ip, repo, base, target, bench, bench_filter):
     ssh_cmd(ip, bench_cmd_base, stream=True)
 
     # Run target branch benchmarks
-    print(f"\n{'='*60}")
-    print(f"Benchmarking target branch: {target}")
-    print(f"{'='*60}")
+    stage(f"Benchmarking target branch: {target}")
     ssh_cmd(ip, f"cd /root/repo && git checkout {target}", stream=True)
-
     bench_cmd_target = (
         f"cd /root/repo && source /root/.cargo/env && "
         f"cargo bench --bench {bench} -- --save-baseline target {filter_arg}"
     )
     ssh_cmd(ip, bench_cmd_target, stream=True)
 
-    # Compare results with critcmp
-    print(f"\n{'='*60}")
-    print("Comparing results (critcmp)")
-    print(f"{'='*60}")
+    # Compare results
+    stage("Comparing results (critcmp)")
     comparison = ssh_cmd(
         ip,
         "cd /root/repo && source /root/.cargo/env && critcmp base target",
@@ -287,9 +290,10 @@ def _signal_handler(signum, frame):
 
 def cmd_run(args):
     """Run benchmarks on a remote server."""
-    global _cleanup_server_name, _keep_server, _ssh_key_path
+    global _cleanup_server_name, _keep_server, _ssh_key_path, _stage_num
     _keep_server = args.keep
     _ssh_key_path = args.ssh_key
+    _stage_num = 0
 
     preflight_checks()
 
@@ -306,9 +310,11 @@ def cmd_run(args):
         fetch_results(ip, comparison)
     finally:
         if args.keep:
-            print(f"\n--keep specified. Server '{server_name}' left running at {ip}.")
-            print(f"Destroy it manually with: python bench_runner.py destroy")
+            stage("Done (server kept)")
+            print(f"Server '{server_name}' left running at {ip}.")
+            print(f"Destroy manually with: python bench_runner.py destroy")
         else:
+            stage("Tearing down server")
             destroy_server(server_name)
             _cleanup_server_name = None
 
