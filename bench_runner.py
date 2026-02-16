@@ -152,7 +152,7 @@ def create_server(server_name, server_type, ssh_key_name, toolchain):
             "--name", server_name,
             "--type", server_type,
             "--image", "ubuntu-24.04",
-            "--location", "ash",
+            "--location", "nbg1",
             "--ssh-key", ssh_key_name,
             "--label", SERVER_LABEL,
             "--user-data-from-file", tmp_path,
@@ -380,7 +380,7 @@ def main():
         default=os.environ.get("BENCH_RUNNER_SSH_KEY", DEFAULT_SSH_KEY),
         help="Path to SSH private key (default: $BENCH_RUNNER_SSH_KEY or ~/.ssh/hetzner-bench)",
     )
-    run_parser.add_argument("--server-type", default="ccx13", help="Hetzner server type (default: ccx13)")
+    run_parser.add_argument("--server-type", default="cax31", help="Hetzner server type (default: cax31)")
     run_parser.add_argument("--keep", action="store_true", help="Don't destroy server after run")
     run_parser.set_defaults(func=cmd_run)
 
