@@ -146,7 +146,7 @@ def get_ssh_key_name():
     return keys[0]["name"]
 
 
-def create_server(server_name, server_type, ssh_key_name, toolchain):
+def create_server(server_name, server_type, ssh_key_name, toolchain, location="nbg1"):
     """Provision a Hetzner server with cloud-init."""
     stage(f"Provisioning server ({server_type}, toolchain {toolchain})")
 
@@ -164,7 +164,7 @@ def create_server(server_name, server_type, ssh_key_name, toolchain):
             "--name", server_name,
             "--type", server_type,
             "--image", "ubuntu-24.04",
-            "--location", "nbg1",
+            "--location", location,
             "--ssh-key", ssh_key_name,
             "--label", SERVER_LABEL,
             "--user-data-from-file", tmp_path,
@@ -314,7 +314,7 @@ def cmd_run(args):
     server_name = f"{SERVER_NAME_PREFIX}-{secrets.token_hex(4)}"
     _cleanup_server_name = server_name
     ssh_key_name = get_ssh_key_name()
-    ip = create_server(server_name, args.server_type, ssh_key_name, args.toolchain)
+    ip = create_server(server_name, args.server_type, ssh_key_name, args.toolchain, args.location)
 
     try:
         wait_for_ssh(ip)
@@ -399,6 +399,7 @@ def main():
         help="Path to SSH private key (default: $BENCH_RUNNER_SSH_KEY or ~/.ssh/hetzner-bench)",
     )
     run_parser.add_argument("--server-type", default="cax31", help="Hetzner server type (default: cax31)")
+    run_parser.add_argument("--location", default="nbg1", help="Hetzner location (default: nbg1)")
     run_parser.add_argument("--keep", action="store_true", help="Don't destroy server after run")
     run_parser.set_defaults(func=cmd_run)
 
