@@ -9,6 +9,7 @@ No third-party Python dependencies (stdlib only).
 """
 
 import argparse
+import base64
 import json
 import os
 import secrets
@@ -28,6 +29,9 @@ SSH_BASE_OPTS = [
     "-o", "UserKnownHostsFile=/dev/null",
     "-o", "ConnectTimeout=10",
     "-o", "LogLevel=ERROR",
+    "-o", "ServerAliveInterval=30",
+    "-o", "ServerAliveCountMax=20",
+    "-o", "TCPKeepAlive=yes",
 ]
 
 # Global for signal-handler cleanup
@@ -135,6 +139,26 @@ def preflight_checks():
         sys.exit(f"Error: SSH key not found at {_ssh_key_path}")
 
 
+def verify_branches_exist(repo, branches):
+    """Check that each branch exists on the remote before provisioning."""
+    missing = []
+    for branch in branches:
+        try:
+            out = run_cmd(
+                ["git", "ls-remote", "--heads", repo, branch],
+                capture=True, check=True, timeout=30,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            sys.exit(f"Error: Failed to query {repo} for branch '{branch}'.")
+        if not out or not out.strip():
+            missing.append(branch)
+    if missing:
+        sys.exit(
+            f"Error: Branch(es) not found on {repo}: {', '.join(missing)}.\n"
+            f"Push the branch to the remote (e.g. `git push <remote> {missing[0]}`) and retry."
+        )
+
+
 def get_ssh_key_name():
     """Get the name of an SSH key registered with Hetzner."""
     keys = hcloud_json(["ssh-key", "list"])
@@ -231,10 +255,113 @@ def quiesce_system(ip):
     print("System quiesced.")
 
 
-def run_benchmarks(ip, repo, base, target, bench, bench_filter):
+def run_remote_detached(ip, remote_cmd, name, poll_interval=10, max_consecutive_failures=20):
+    """Run a long-running command on the server detached from the SSH session.
+
+    The command is started via nohup with stdout+stderr to a log file and
+    exit status to a done file. We then poll both files over short-lived SSH
+    connections, so the remote process survives SSH drops, sshd crashes, or
+    brief network outages. Streams new log output to local stdout.
+
+    Raises subprocess.CalledProcessError if the remote command exits non-zero.
+    """
+    log_file = f"/root/{name}.log"
+    done_file = f"/root/{name}.done"
+    MARK = "__BENCHRUNNER_MARK__"
+    DONE = "__BENCHRUNNER_DONE__"
+
+    encoded = base64.b64encode(remote_cmd.encode()).decode()
+    starter = (
+        f"rm -f {log_file} {done_file}; "
+        f"nohup bash -c 'bash -c \"$(echo {encoded} | base64 -d)\"; "
+        f"echo $? > {done_file}' > {log_file} 2>&1 < /dev/null & disown"
+    )
+    ssh_cmd(ip, starter, check=True, timeout=30)
+
+    offset = 0
+    consecutive_failures = 0
+
+    while True:
+        probe = (
+            f"tail -c +{offset + 1} {log_file} 2>/dev/null; "
+            f"printf '\\n{MARK}\\n'; "
+            f"wc -c < {log_file} 2>/dev/null | tr -d ' '; "
+            f"printf '{DONE}\\n'; "
+            f"test -f {done_file} && cat {done_file} || echo running"
+        )
+        try:
+            out = ssh_cmd(ip, probe, check=True, timeout=60)
+            consecutive_failures = 0
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                raise RuntimeError(
+                    f"SSH polling failed {consecutive_failures} times in a row for {name}"
+                )
+            print(
+                f"Warning: SSH poll {consecutive_failures}/{max_consecutive_failures} failed; retrying...",
+                file=sys.stderr,
+            )
+            time.sleep(poll_interval * 2)
+            continue
+
+        mark_idx = out.find("\n" + MARK + "\n")
+        done_idx = out.find(DONE + "\n")
+        if mark_idx < 0 or done_idx < 0:
+            time.sleep(poll_interval)
+            continue
+
+        new_log = out[:mark_idx]
+        size_str = out[mark_idx + len("\n" + MARK + "\n"):done_idx].strip()
+        status_str = out[done_idx + len(DONE + "\n"):].strip()
+
+        if new_log:
+            sys.stdout.write(new_log)
+            sys.stdout.flush()
+
+        try:
+            offset = int(size_str)
+        except ValueError:
+            pass
+
+        if status_str != "running":
+            # Flush any bytes written between our tail and the done-file check
+            try:
+                final = ssh_cmd(
+                    ip,
+                    f"tail -c +{offset + 1} {log_file} 2>/dev/null || true",
+                    check=False, timeout=30,
+                )
+                if final:
+                    sys.stdout.write(final)
+                    sys.stdout.flush()
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                pass
+
+            try:
+                exit_code = int(status_str)
+            except ValueError:
+                exit_code = 1
+            if exit_code != 0:
+                raise subprocess.CalledProcessError(exit_code, f"remote:{name}")
+            return
+
+        time.sleep(poll_interval)
+
+
+def run_benchmarks(ip, repo, base, target, bench, bench_filter, clickbench_data):
     """Clone the repo and run benchmarks on both branches."""
     stage(f"Cloning {repo}")
     ssh_cmd(ip, f"git clone --depth=50 --no-single-branch {repo} /root/repo", stream=True)
+
+    if clickbench_data:
+        stage("Downloading ClickBench partitioned dataset (~14 GB)")
+        ssh_cmd(
+            ip,
+            "cd /root/repo && ./benchmarks/bench.sh data clickbench_partitioned",
+            stream=True,
+            timeout=3600,
+        )
 
     filter_arg = f"'{bench_filter}'" if bench_filter else ""
 
@@ -245,7 +372,7 @@ def run_benchmarks(ip, repo, base, target, bench, bench_filter):
         f"cd /root/repo && source /root/.cargo/env && "
         f"cargo bench --bench {bench} -- --save-baseline base {filter_arg}"
     )
-    ssh_cmd(ip, bench_cmd_base, stream=True)
+    run_remote_detached(ip, bench_cmd_base, "bench-base")
 
     # Run target branch benchmarks
     stage(f"Benchmarking target branch: {target}")
@@ -254,7 +381,7 @@ def run_benchmarks(ip, repo, base, target, bench, bench_filter):
         f"cd /root/repo && source /root/.cargo/env && "
         f"cargo bench --bench {bench} -- --save-baseline target {filter_arg}"
     )
-    ssh_cmd(ip, bench_cmd_target, stream=True)
+    run_remote_detached(ip, bench_cmd_target, "bench-target")
 
     # Compare results
     stage("Comparing results (critcmp)")
@@ -310,6 +437,7 @@ def cmd_run(args):
     _run_start = None
 
     preflight_checks()
+    verify_branches_exist(args.repo, [args.base, args.target])
 
     server_name = f"{SERVER_NAME_PREFIX}-{secrets.token_hex(4)}"
     _cleanup_server_name = server_name
@@ -320,7 +448,9 @@ def cmd_run(args):
         wait_for_ssh(ip)
         wait_for_cloud_init(ip)
         quiesce_system(ip)
-        comparison = run_benchmarks(ip, args.repo, args.base, args.target, args.bench, args.filter)
+        comparison = run_benchmarks(
+            ip, args.repo, args.base, args.target, args.bench, args.filter, args.clickbench_data
+        )
         fetch_results(ip, comparison)
     finally:
         if args.keep:
@@ -398,9 +528,14 @@ def main():
         default=os.environ.get("BENCH_RUNNER_SSH_KEY", DEFAULT_SSH_KEY),
         help="Path to SSH private key (default: $BENCH_RUNNER_SSH_KEY or ~/.ssh/hetzner-bench)",
     )
-    run_parser.add_argument("--server-type", default="cax31", help="Hetzner server type (default: cax31)")
+    run_parser.add_argument("--server-type", default="cax41", help="Hetzner server type (default: cax41)")
     run_parser.add_argument("--location", default="nbg1", help="Hetzner location (default: nbg1)")
     run_parser.add_argument("--keep", action="store_true", help="Don't destroy server after run")
+    run_parser.add_argument(
+        "--clickbench-data",
+        action="store_true",
+        help="Download ClickBench partitioned dataset before benchmarking (required for sql_planner)",
+    )
     run_parser.set_defaults(func=cmd_run)
 
     # status

@@ -56,7 +56,7 @@ python bench_runner.py destroy   # Tear down all bench-runner servers
 | `--filter` | none | Criterion filter to run a subset of benchmarks |
 | `--toolchain` | `$BENCH_RUNNER_TOOLCHAIN` or `stable` | Rust toolchain version |
 | `--ssh-key` | `$BENCH_RUNNER_SSH_KEY` or `~/.ssh/hetzner-bench` | SSH private key |
-| `--server-type` | `cax31` | Hetzner server type (arm64 Ampere) |
+| `--server-type` | `cax41` | Hetzner server type (arm64 Ampere) |
 | `--keep` | false | Leave server running after benchmarks |
 
 ## Environment variables
