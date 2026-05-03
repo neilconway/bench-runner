@@ -349,7 +349,8 @@ def run_remote_detached(ip, remote_cmd, name, poll_interval=10, max_consecutive_
         time.sleep(poll_interval)
 
 
-def run_benchmarks(ip, repo, base, target, bench, bench_filter, clickbench_data):
+def run_benchmarks(ip, repo, base, target, bench, bench_filter, clickbench_data,
+                   measurement_time=None, warm_up_time=None):
     """Clone the repo and run benchmarks on both branches."""
     stage(f"Cloning {repo}")
     ssh_cmd(ip, f"git clone --depth=50 --no-single-branch {repo} /root/repo", stream=True)
@@ -364,13 +365,18 @@ def run_benchmarks(ip, repo, base, target, bench, bench_filter, clickbench_data)
         )
 
     filter_arg = f"'{bench_filter}'" if bench_filter else ""
+    criterion_args = ""
+    if measurement_time is not None:
+        criterion_args += f" --measurement-time {measurement_time}"
+    if warm_up_time is not None:
+        criterion_args += f" --warm-up-time {warm_up_time}"
 
     # Run base branch benchmarks
     stage(f"Benchmarking base branch: {base}")
     ssh_cmd(ip, f"cd /root/repo && git checkout {base}", stream=True)
     bench_cmd_base = (
         f"cd /root/repo && source /root/.cargo/env && "
-        f"cargo bench --bench {bench} -- --save-baseline base {filter_arg}"
+        f"cargo bench --bench {bench} -- --save-baseline base{criterion_args} {filter_arg}"
     )
     run_remote_detached(ip, bench_cmd_base, "bench-base")
 
@@ -379,7 +385,7 @@ def run_benchmarks(ip, repo, base, target, bench, bench_filter, clickbench_data)
     ssh_cmd(ip, f"cd /root/repo && git checkout {target}", stream=True)
     bench_cmd_target = (
         f"cd /root/repo && source /root/.cargo/env && "
-        f"cargo bench --bench {bench} -- --save-baseline target {filter_arg}"
+        f"cargo bench --bench {bench} -- --save-baseline target{criterion_args} {filter_arg}"
     )
     run_remote_detached(ip, bench_cmd_target, "bench-target")
 
@@ -449,7 +455,8 @@ def cmd_run(args):
         wait_for_cloud_init(ip)
         quiesce_system(ip)
         comparison = run_benchmarks(
-            ip, args.repo, args.base, args.target, args.bench, args.filter, args.clickbench_data
+            ip, args.repo, args.base, args.target, args.bench, args.filter, args.clickbench_data,
+            measurement_time=args.measurement_time, warm_up_time=args.warm_up_time,
         )
         fetch_results(ip, comparison)
     finally:
@@ -518,6 +525,14 @@ def main():
     run_parser.add_argument("--target", required=True, help="Target branch to compare")
     run_parser.add_argument("--bench", required=True, help="Benchmark name for cargo bench --bench")
     run_parser.add_argument("--filter", default=None, help="Criterion filter pattern")
+    run_parser.add_argument(
+        "--measurement-time", type=float, default=None,
+        help="Criterion measurement time in seconds (default: 5)",
+    )
+    run_parser.add_argument(
+        "--warm-up-time", type=float, default=None,
+        help="Criterion warm-up time in seconds (default: 3)",
+    )
     run_parser.add_argument(
         "--toolchain",
         default=os.environ.get("BENCH_RUNNER_TOOLCHAIN", "stable"),
